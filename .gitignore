@@ -1,0 +1,27 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# App bundle output
+build/
+
+# Fonts fetched by build.sh
+Sources/SimpleNote/Resources/Fonts/*.ttf
+Sources/SimpleNote/Resources/Fonts/*.otf
+
+# Xcode (in case anyone opens the package in Xcode)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
