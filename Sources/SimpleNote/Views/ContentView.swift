@@ -1,88 +1,82 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Bindable var store: NoteStore
-    @Binding var showPalette: Bool
-    @Binding var showFindAcross: Bool
-    @Binding var pendingDelete: Note.ID?
-
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @Environment(NoteStore.self) private var store
+    @Environment(AppState.self) private var appState
+    @Environment(LicenseManager.self) private var license
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(store: store)
-                .toolbar(removing: .sidebarToggle)
-        } detail: {
-            ZStack {
-                Palette.bg.ignoresSafeArea()
-                if let id = store.selectedID, store.note(id: id) != nil {
-                    EditorView(store: store, noteID: id)
-                } else {
-                    Text("Select or create a note.")
-                        .font(Typography.serifItalic(28))
-                        .foregroundStyle(Palette.textMuted)
-                }
+        Group {
+            if license.requiresActivation {
+                ActivationView()
+            } else {
+                notes
             }
         }
-        .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    toggleSidebar()
-                } label: {
-                    Image(systemName: "sidebar.left")
-                        .foregroundStyle(Palette.textSecondary)
-                }
-                .keyboardShortcut("/", modifiers: .command)
-                .help("Toggle sidebar (⌘/)")
+        .animation(.easeInOut(duration: 0.25), value: license.requiresActivation)
+        .alert(
+            "Your notes file couldn’t be read",
+            isPresented: Binding(
+                get: { store.corruptFileURL != nil },
+                set: { if !$0 { store.corruptFileURL = nil } }
+            ),
+            presenting: store.corruptFileURL
+        ) { url in
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
             }
-
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showPalette = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "command")
-                        Text("Command")
-                            .font(Typography.ui(12))
-                    }
-                    .foregroundStyle(Palette.textSecondary)
-                }
-                .help("Command palette (⌘K)")
-            }
-        }
-        .background(Palette.bg)
-        .sheet(isPresented: $showPalette) {
-            CommandPaletteView(store: store, isPresented: $showPalette)
-                .background(Palette.bg1)
-                .preferredColorScheme(.dark)
-        }
-        .sheet(isPresented: $showFindAcross) {
-            FindAcrossNotesView(store: store, isPresented: $showFindAcross)
-                .background(Palette.bg1)
-                .preferredColorScheme(.dark)
-        }
-        .alert("Delete this note?",
-               isPresented: Binding(
-                   get: { pendingDelete != nil },
-                   set: { if !$0 { pendingDelete = nil } }
-               ),
-               presenting: pendingDelete) { id in
-            Button("Delete", role: .destructive) {
-                store.delete(id: id)
-                pendingDelete = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingDelete = nil
-            }
-        } message: { _ in
-            Text("This can't be undone.")
+            Button("OK", role: .cancel) {}
+        } message: { url in
+            Text("It was moved aside to “\(url.lastPathComponent)” so nothing is lost. Simple Note has started a fresh notes file.")
         }
     }
 
-    private func toggleSidebar() {
-        withAnimation(.easeOut(duration: 0.18)) {
-            columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+    private var notes: some View {
+        @Bindable var store = store
+        @Bindable var appState = appState
+
+        return NavigationSplitView(columnVisibility: $appState.columnVisibility) {
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+        } detail: {
+            if let id = store.selectedID, store.note(id: id) != nil {
+                EditorView(noteID: id)
+                    .id(id)
+            } else {
+                ContentUnavailableView {
+                    Label("No Note Selected", systemImage: "note.text")
+                } description: {
+                    Text("Press ⌘N to start writing.")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Palette.bg)
+            }
+        }
+        .sheet(item: $appState.activeSheet, onDismiss: {
+            let action = appState.afterSheetDismiss
+            appState.afterSheetDismiss = nil
+            action?()
+        }) { sheet in
+            switch sheet {
+            case .palette: CommandPaletteView()
+            case .findAcross: FindAcrossNotesView()
+            }
+        }
+        .alert(
+            "Delete “\(store.note(id: appState.pendingDelete)?.displayTitle ?? "Note")”?",
+            isPresented: Binding(
+                get: { appState.pendingDelete != nil },
+                set: { if !$0 { appState.pendingDelete = nil } }
+            ),
+            presenting: appState.pendingDelete
+        ) { id in
+            Button("Delete", role: .destructive) {
+                store.delete(id: id)
+                appState.pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This can’t be undone.")
         }
     }
 }

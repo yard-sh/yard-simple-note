@@ -1,78 +1,75 @@
 import Foundation
+import Synchronization
 
 enum NotesFile {
     static let appFolderName = "SimpleNote"
     static let fileName = "notes.json"
 
-    static func directoryURL() -> URL {
-        let fm = FileManager.default
-        let base = (try? fm.url(for: .applicationSupportDirectory,
-                                 in: .userDomainMask,
-                                 appropriateFor: nil,
-                                 create: true))
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
-        let dir = base.appendingPathComponent(appFolderName, isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        return dir
+    enum LoadResult {
+        case missing
+        case loaded([Note])
+        /// The file couldn't be decoded. It was moved aside (never deleted) to `quarantinedAt`.
+        case corrupt(quarantinedAt: URL?)
     }
 
-    static func fileURL() -> URL {
-        directoryURL().appendingPathComponent(fileName, isDirectory: false)
+    static var directoryURL: URL {
+        URL.applicationSupportDirectory.appending(path: appFolderName, directoryHint: .isDirectory)
     }
 
-    /// Load notes from disk. Returns an empty array if the file is missing.
-    /// On a corrupt file, the bad file is renamed (never deleted) and an empty array is returned.
-    static func load() -> [Note] {
-        let url = fileURL()
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+    static var fileURL: URL {
+        directoryURL.appending(path: fileName, directoryHint: .notDirectory)
+    }
+
+    static func load() -> LoadResult {
+        let url = fileURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
         do {
             let data = try Data(contentsOf: url)
-            if data.isEmpty { return [] }
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode([Note].self, from: data)
+            if data.isEmpty { return .missing }
+            return .loaded(try decoder.decode([Note].self, from: data))
         } catch {
-            quarantineCorrupt(url: url)
-            return []
+            return .corrupt(quarantinedAt: quarantineCorrupt(url: url))
         }
     }
 
-    static func save(_ notes: [Note]) throws {
-        let dir = directoryURL()
-        let target = fileURL()
-        let temp = dir.appendingPathComponent("notes.json.tmp", isDirectory: false)
+    /// Highest generation written so far. Guards against a slower, older save landing
+    /// after a newer one (e.g. a background save finishing after the quit-time flush).
+    private static let lastWritten = Mutex<Int>(0)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(notes)
-
-        if FileManager.default.fileExists(atPath: temp.path) {
-            try? FileManager.default.removeItem(at: temp)
-        }
-        try data.write(to: temp, options: .atomic)
-
-        if FileManager.default.fileExists(atPath: target.path) {
-            do {
-                _ = try FileManager.default.replaceItemAt(target, withItemAt: temp)
-                return
-            } catch {
-                // Fallback for non-APFS / iCloud-synced volumes.
-                try? FileManager.default.removeItem(at: target)
-                try FileManager.default.moveItem(at: temp, to: target)
-                return
-            }
-        } else {
-            try FileManager.default.moveItem(at: temp, to: target)
+    /// Writes atomically: the data goes to a temporary file that then replaces the target,
+    /// so a crash mid-write never leaves a truncated notes.json behind. A snapshot older
+    /// than one already written is skipped.
+    static func save(_ notes: [Note], generation: Int) throws {
+        try lastWritten.withLock { last in
+            guard generation > last else { return }
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            let data = try encoder.encode(notes)
+            try data.write(to: fileURL, options: .atomic)
+            last = generation
         }
     }
 
-    private static func quarantineCorrupt(url: URL) {
-        let stamp = ISO8601DateFormatter().string(from: .now).replacingOccurrences(of: ":", with: "-")
-        let dest = url.deletingLastPathComponent()
-            .appendingPathComponent("notes.json.corrupt-\(stamp)")
-        try? FileManager.default.moveItem(at: url, to: dest)
+    private static var decoder: JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+
+    private static var encoder: JSONEncoder {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }
+
+    private static func quarantineCorrupt(url: URL) -> URL? {
+        let stamp = Date.now.ISO8601Format().replacingOccurrences(of: ":", with: "-")
+        let dest = url.deletingLastPathComponent().appending(path: "notes.json.corrupt-\(stamp)")
+        do {
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        } catch {
+            return nil
+        }
     }
 }

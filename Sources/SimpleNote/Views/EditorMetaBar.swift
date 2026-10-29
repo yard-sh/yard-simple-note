@@ -8,32 +8,27 @@ struct EditorMetaBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(longDate)
-                .foregroundStyle(Palette.textFaint)
+            Text(modifiedAt.formatted(.dateTime.weekday(.wide).month(.wide).day()))
             sep
-            Text(timeOnly)
-                .foregroundStyle(Palette.textFaint)
+            Text(modifiedAt.formatted(date: .omitted, time: .shortened))
             sep
             Text("\(wordCount) word\(wordCount == 1 ? "" : "s")")
-                .foregroundStyle(Palette.textFaint)
                 .monospacedDigit()
             sep
             saveLabel
             if isPreview {
                 sep
-                Text("Preview")
-                    .foregroundStyle(Palette.accentSoft)
+                Text("Preview").foregroundStyle(Palette.accent)
             }
             Spacer()
         }
         .font(Typography.mono(10.5))
-        .padding(.horizontal, 36)
-        .padding(.top, 22)
-        .padding(.bottom, 16)
+        .foregroundStyle(Palette.textMuted)
+        .lineLimit(1)
     }
 
     private var sep: some View {
-        Text("·").foregroundStyle(Palette.textFaint).opacity(0.55)
+        Text("·")
     }
 
     private var saveLabel: some View {
@@ -43,45 +38,38 @@ struct EditorMetaBar: View {
                 .frame(width: 5, height: 5)
             Text(saveText)
                 .foregroundStyle(textColor)
+                .help(saveHelp)
         }
     }
 
     private var dotColor: Color {
         switch saveState {
-        case .saved:   return Palette.success
-        case .dirty:   return Palette.accentSoft.opacity(0.7)
-        case .saving:  return Palette.accent
-        case .error:   return Color.red.opacity(0.8)
+        case .saved:  return Palette.success
+        case .dirty:  return Palette.textMuted
+        case .saving: return Palette.accent
+        case .error:  return Palette.danger
         }
     }
 
     private var textColor: Color {
         switch saveState {
-        case .saved:   return Palette.success
-        case .dirty:   return Palette.textMuted
-        case .saving:  return Palette.accentSoft
-        case .error:   return Color(red: 0.99, green: 0.65, blue: 0.65)
+        case .saved:  return Palette.success
+        case .dirty, .saving: return Palette.textMuted
+        case .error:  return Palette.danger
         }
     }
 
     private var saveText: String {
         switch saveState {
-        case .saved:        return "Saved"
-        case .dirty:        return "Editing…"
-        case .saving:       return "Saving…"
-        case .error(let m): return "Save failed: \(m)"
+        case .saved:  return "Saved"
+        case .dirty:  return "Editing…"
+        case .saving: return "Saving…"
+        case .error:  return "Save failed"
         }
     }
 
-    private var longDate: String {
-        let f = DateFormatter()
-        f.dateFormat = "EEEE, MMMM d"
-        return f.string(from: modifiedAt)
-    }
-
-    private var timeOnly: String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f.string(from: modifiedAt)
+    private var saveHelp: String {
+        if case .error(let message) = saveState { return message }
+        return ""
     }
 }

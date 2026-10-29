@@ -1,5 +1,14 @@
 {
-  "version": 1,
-  "product_slug": "simple-note",
-  "ignore_files": []
+  "version": 9,
+  "project_slug": "simple-note-3",
+  "ignore_files": [],
+  "downloads": {
+    "buttons": [
+      {
+        "condition": "ends_with",
+        "value": "-mac.zip",
+        "label": "Download for Mac"
+      }
+    ]
+  }
 }

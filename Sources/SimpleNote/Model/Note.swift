@@ -1,6 +1,6 @@
 import Foundation
 
-struct Note: Identifiable, Codable, Hashable {
+struct Note: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var title: String
     var body: String
@@ -25,8 +25,7 @@ struct Note: Identifiable, Codable, Hashable {
         let firstLine = body
             .split(whereSeparator: \.isNewline)
             .first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespaces) ?? ""
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
         return firstLine.isEmpty ? "Untitled" : firstLine
     }
 
@@ -35,5 +34,10 @@ struct Note: Identifiable, Codable, Hashable {
         if raw.isEmpty { return "Empty note" }
         let oneLine = raw.replacingOccurrences(of: "\n", with: " ")
         return String(oneLine.prefix(140))
+    }
+
+    func matches(_ query: String) -> Bool {
+        let opts: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        return title.range(of: query, options: opts) != nil || body.range(of: query, options: opts) != nil
     }
 }

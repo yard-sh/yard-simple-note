@@ -7,8 +7,10 @@ Package.resolved
 build/
 
 # Fonts fetched by build.sh
-Sources/SimpleNote/Resources/Fonts/*.ttf
-Sources/SimpleNote/Resources/Fonts/*.otf
+PackagingResources/Fonts/
+
+# Yard API key injected by build.sh (see secrets.env.example)
+secrets.env
 
 # Xcode (in case anyone opens the package in Xcode)
 *.xcodeproj/

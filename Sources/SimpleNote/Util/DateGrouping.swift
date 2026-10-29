@@ -1,73 +1,53 @@
 import Foundation
 
-enum NoteBucket: String, CaseIterable, Hashable {
+enum NoteBucket: CaseIterable, Hashable {
     case today, yesterday, thisWeek, earlier
 
     var label: String {
         switch self {
         case .today:     return "Today"
         case .yesterday: return "Yesterday"
-        case .thisWeek:  return "This week"
+        case .thisWeek:  return "Previous 7 Days"
         case .earlier:   return "Earlier"
-        }
-    }
-
-    var order: Int {
-        switch self {
-        case .today:     return 0
-        case .yesterday: return 1
-        case .thisWeek:  return 2
-        case .earlier:   return 3
         }
     }
 }
 
 enum DateGrouping {
     static func bucket(for date: Date, now: Date = .now, calendar: Calendar = .current) -> NoteBucket {
-        if calendar.isDateInToday(date) { return .today }
-        if calendar.isDateInYesterday(date) { return .yesterday }
-
-        let dateYear = calendar.component(.yearForWeekOfYear, from: date)
-        let nowYear  = calendar.component(.yearForWeekOfYear, from: now)
-        let dateWeek = calendar.component(.weekOfYear, from: date)
-        let nowWeek  = calendar.component(.weekOfYear, from: now)
-        if dateYear == nowYear, dateWeek == nowWeek { return .thisWeek }
-
-        // Friendly fallback: anything in the last 7 days still groups as "This week".
-        if let diff = calendar.dateComponents([.day], from: date, to: now).day,
-           diff >= 0, diff < 7 {
+        if calendar.isDate(date, inSameDayAs: now) { return .today }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) { return .yesterday }
+        let startOfToday = calendar.startOfDay(for: now)
+        if let weekAgo = calendar.date(byAdding: .day, value: -7, to: startOfToday), date >= weekAgo {
             return .thisWeek
         }
         return .earlier
     }
 
+    /// Notes are expected newest-first (as `NoteStore` keeps them); order is preserved.
     static func sectionedNotes(_ notes: [Note], now: Date = .now) -> [(bucket: NoteBucket, notes: [Note])] {
         let grouped = Dictionary(grouping: notes) { bucket(for: $0.modifiedAt, now: now) }
-        return NoteBucket.allCases
-            .compactMap { b -> (NoteBucket, [Note])? in
-                guard let arr = grouped[b], !arr.isEmpty else { return nil }
-                return (b, arr.sorted { $0.modifiedAt > $1.modifiedAt })
-            }
-            .map { (bucket: $0.0, notes: $0.1) }
+        return NoteBucket.allCases.compactMap { b in
+            guard let arr = grouped[b], !arr.isEmpty else { return nil }
+            return (bucket: b, notes: arr)
+        }
     }
 
+    /// Locale-aware (respects the user's 12/24-hour setting).
     static func rowTimeLabel(for date: Date, bucket: NoteBucket, now: Date = .now, calendar: Calendar = .current) -> String {
         switch bucket {
         case .today:
-            let f = DateFormatter()
-            f.dateFormat = "HH:mm"
-            return f.string(from: date)
+            return date.formatted(date: .omitted, time: .shortened)
         case .yesterday:
-            return "Yest"
+            return "Yesterday"
         case .thisWeek:
-            let f = DateFormatter()
-            f.dateFormat = "EEE"
-            return f.string(from: date)
+            return date.formatted(.dateTime.weekday(.abbreviated))
         case .earlier:
-            let f = DateFormatter()
-            let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
-            f.dateFormat = sameYear ? "MMM d" : "MMM yyyy"
-            return f.string(from: date)
+            let sameYear = calendar.isDate(date, equalTo: now, toGranularity: .year)
+            return sameYear
+                ? date.formatted(.dateTime.month(.abbreviated).day())
+                : date.formatted(.dateTime.month(.abbreviated).year())
         }
     }
 }

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Build Simple Note as a macOS .app bundle.
-# Usage:  ./build.sh             — universal release build into build/SimpleNote.app
+# Usage:  ./build.sh             — universal release build into build/Simple Note.app
 #         ./build.sh --arm64     — single-arch (faster local builds)
 #         ./build.sh --skip-fonts — don't try to fetch fonts (use whatever's on disk)
+#
+# License validation needs a Yard API key with the licenses:validate scope, read from
+# $YARD_API_KEY or secrets.env (see secrets.env.example). Without one the app still
+# builds and runs; it just can't verify license keys.
+#
+# Test build against a Yard sandbox (accepts that sandbox's simulated purchases only):
+#         YARD_SANDBOX=Development ./build.sh --arm64
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -10,7 +17,7 @@ APP_NAME="SimpleNote"
 DISPLAY_NAME="Simple Note"
 BUILD_DIR="$ROOT/build"
 APP_DIR="$BUILD_DIR/$DISPLAY_NAME.app"
-FONTS_DIR="$ROOT/Sources/SimpleNote/Resources/Fonts"
+FONTS_DIR="$ROOT/PackagingResources/Fonts"
 PACKAGING_DIR="$ROOT/PackagingResources"
 
 ARCHS=(arm64 x86_64)
@@ -81,20 +88,42 @@ mkdir -p "$APP_DIR/Contents/Resources/Fonts"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
-# SwiftPM resource bundle (named "<package>_<target>.bundle"). Move to Contents/Resources.
-RESOURCE_BUNDLE="$BIN_DIR/SimpleNote_SimpleNote.bundle"
-if [[ -d "$RESOURCE_BUNDLE" ]]; then
-  cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
-fi
+# SwiftPM's link step records the deployment target as the SDK version. macOS uses the
+# SDK version for linked-on-or-after behaviour, so stamp the SDK that was actually used.
+MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PACKAGING_DIR/Info.plist")"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+vtool -set-build-version macos "$MIN_OS" "$SDK_VERSION" -replace \
+  -output "$APP_DIR/Contents/MacOS/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 
-# Copy fonts directly into Contents/Resources/Fonts as well so AppKit's
-# ATSApplicationFontsPath can pick them up at launch (belt-and-suspenders).
+# Fonts live in Contents/Resources/Fonts; AppKit registers them at launch via
+# ATSApplicationFontsPath in Info.plist.
 if [[ -d "$FONTS_DIR" ]] && compgen -G "$FONTS_DIR/*.ttf" > /dev/null; then
-  cp -f "$FONTS_DIR"/*.ttf "$APP_DIR/Contents/Resources/Fonts/" 2>/dev/null || true
+  cp -f "$FONTS_DIR"/*.ttf "$APP_DIR/Contents/Resources/Fonts/"
 fi
 
-# Info.plist
+# Asset catalog (the leaf-green AccentColor named by NSAccentColorName in Info.plist).
+xcrun actool "$PACKAGING_DIR/Assets.xcassets" \
+  --compile "$APP_DIR/Contents/Resources" \
+  --platform macosx \
+  --minimum-deployment-target "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PACKAGING_DIR/Info.plist")" \
+  --output-partial-info-plist "$BUILD_DIR/assets-info.plist" \
+  --output-format human-readable-text --notices --warnings > /dev/null
+
+# Info.plist, with the Yard API key injected when one is configured.
 cp "$PACKAGING_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+if [[ -z "${YARD_API_KEY:-}" && -f "$ROOT/secrets.env" ]]; then
+  YARD_API_KEY="$(sed -n 's/^YARD_API_KEY=//p' "$ROOT/secrets.env" | tr -d '[:space:]')"
+fi
+if [[ -n "${YARD_API_KEY:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :YardAPIKey string $YARD_API_KEY" "$APP_DIR/Contents/Info.plist"
+  echo "[bundle] Yard API key injected"
+else
+  echo "[bundle] WARN: no YARD_API_KEY — license validation is disabled in this build" >&2
+fi
+if [[ -n "${YARD_SANDBOX:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :YardSandbox string $YARD_SANDBOX" "$APP_DIR/Contents/Info.plist"
+  echo "[bundle] SANDBOX BUILD for '$YARD_SANDBOX' — test only, do not publish" >&2
+fi
 
 # PkgInfo
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
@@ -107,7 +136,17 @@ codesign --verify --deep --strict "$APP_DIR" || {
   exit 1
 }
 
-# ---------- 5. Done ----------
+# ---------- 5. Zip for distribution ----------
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Contents/Info.plist")"
+ZIP_PATH="$BUILD_DIR/SimpleNote-$VERSION-mac${YARD_SANDBOX:+-sandbox-$YARD_SANDBOX}.zip"
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
+
+# ---------- 6. Done ----------
 echo
 echo "Built: $APP_DIR"
+echo "Zip:   $ZIP_PATH"
 echo "Open with:  open \"$APP_DIR\""
+if [[ -z "${YARD_SANDBOX:-}" ]]; then
+  echo "Publish:    yard releases publish v$VERSION --file \"$ZIP_PATH\""
+fi

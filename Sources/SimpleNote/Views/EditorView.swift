@@ -2,235 +2,108 @@ import SwiftUI
 import AppKit
 
 struct EditorView: View {
-    @Bindable var store: NoteStore
+    @Environment(NoteStore.self) private var store
+    @Environment(AppState.self) private var appState
     let noteID: Note.ID
 
-    @State private var titleText: String = ""
-    @State private var bodyText: String = ""
-    @State private var isPreview: Bool = false
-    @State private var debouncedWordCount: Int = 0
+    @State private var titleText = ""
+    @State private var bodyText = ""
+    @State private var wordCount = 0
     @State private var wordCountTask: Task<Void, Never>?
-
-    @State private var findActive: Bool = false
-    @State private var findQuery: String = ""
-    @State private var findCurrent: Int = 0
+    @State private var bodyFocusRequest = 0
 
     @FocusState private var titleFocused: Bool
-    @FocusState private var bodyFocused: Bool
 
     var body: some View {
-        ZStack(alignment: .top) {
-            Palette.bg.ignoresSafeArea()
+        VStack(alignment: .leading, spacing: 0) {
+            if let note = store.note(id: noteID) {
+                EditorMetaBar(
+                    modifiedAt: note.modifiedAt,
+                    wordCount: wordCount,
+                    saveState: store.saveState,
+                    isPreview: appState.isPreview
+                )
+                .padding(.horizontal, 36)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
 
-            VStack(spacing: 0) {
-                if let note = store.note(id: noteID) {
-                    EditorMetaBar(
-                        modifiedAt: note.modifiedAt,
-                        wordCount: debouncedWordCount,
-                        saveState: store.saveState,
-                        isPreview: isPreview
-                    )
+                TextField("Untitled", text: $titleText)
+                    .textFieldStyle(.plain)
+                    .font(Typography.serifItalic(34))
+                    .foregroundStyle(Palette.text)
+                    .focused($titleFocused)
+                    .onSubmit { bodyFocusRequest += 1 }
+                    .padding(.horizontal, 36)
+                    .padding(.bottom, 12)
 
-                    titleField
-                        .padding(.horizontal, 36)
-                        .padding(.bottom, 16)
-
-                    contentArea
-                        .padding(.horizontal, 30)
-                        .padding(.bottom, 36)
+                if appState.isPreview {
+                    preview
                 } else {
-                    emptyState
+                    EditorTextView(text: $bodyText, focusRequest: bodyFocusRequest)
+                        .padding(.horizontal, 28)
                 }
             }
-
-            if findActive {
-                FindInNoteBar(
-                    query: $findQuery,
-                    currentMatch: $findCurrent,
-                    totalMatches: matchRanges.count,
-                    onNext: jumpNext,
-                    onPrev: jumpPrev,
-                    onClose: dismissFind
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
-                .zIndex(2)
-            }
-
-            // Hidden buttons that own the view-level keyboard shortcuts.
-            VStack {
-                Button("Toggle preview") { isPreview.toggle() }
-                    .keyboardShortcut(.return, modifiers: .command)
-                Button("Find") { startFind() }
-                    .keyboardShortcut("f", modifiers: .command)
-            }
-            .frame(width: 0, height: 0)
-            .opacity(0)
-            .accessibilityHidden(true)
         }
-        .focusedSceneValue(\.focusedNoteID, noteID)
-        .onAppear { syncFromStore(force: true) }
-        .onChange(of: noteID) { _, _ in syncFromStore(force: true); dismissFind() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.bg)
+        .navigationTitle(titleText.isEmpty ? "Untitled" : titleText)
+        .onAppear(perform: loadFromStore)
         .onChange(of: titleText) { _, newValue in store.update(id: noteID, title: newValue) }
         .onChange(of: bodyText) { _, newValue in
             store.update(id: noteID, body: newValue)
             scheduleWordCount()
         }
-        .onChange(of: findQuery) { _, _ in findCurrent = 0 }
     }
 
-    // MARK: - Title field
-
-    private var titleField: some View {
-        TextField("Untitled", text: $titleText, axis: .horizontal)
-            .textFieldStyle(.plain)
-            .font(Typography.serifItalic(34))
-            .foregroundStyle(Palette.text)
-            .focused($titleFocused)
-            .onSubmit {
-                bodyFocused = true
-            }
-    }
-
-    // MARK: - Content area
-
-    @ViewBuilder
-    private var contentArea: some View {
-        if findActive {
-            findHighlightedScroll
-        } else if isPreview {
-            previewScroll
-        } else {
-            editor
-        }
-    }
-
-    private var editor: some View {
-        EditorTextView(text: $bodyText, isFocused: $bodyFocused)
-            .background(Color.clear)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var previewScroll: some View {
+    private var preview: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(InlineMarkdown.paragraphs(from: bodyText).enumerated()), id: \.offset) { _, attr in
                     Text(attr)
-                        .font(Typography.ui(16.5))
-                        .foregroundStyle(Palette.textSecondary)
+                        .font(Typography.ui(16))
+                        .foregroundStyle(Palette.text)
                         .lineSpacing(6)
-                        .frame(maxWidth: 720, alignment: .leading)
+                        .textSelection(.enabled)
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.top, 4)
+            .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 36)
+            .padding(.bottom, 36)
         }
     }
 
-    private var findHighlightedScroll: some View {
-        ScrollView {
-            Text(highlightedAttributedBody)
-                .font(Typography.ui(16))
-                .foregroundStyle(Palette.textSecondary)
-                .lineSpacing(6)
-                .frame(maxWidth: 720, alignment: .leading)
-                .padding(.horizontal, 6)
-                .padding(.top, 8)
-                .textSelection(.enabled)
-        }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Text("No note selected")
-                .font(Typography.serifItalic(28))
-                .foregroundStyle(Palette.textMuted)
-            Text("Press ⌘N to start writing.")
-                .font(Typography.mono(12))
-                .foregroundStyle(Palette.textFaint)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Sync
-
-    private func syncFromStore(force: Bool) {
+    private func loadFromStore() {
         guard let note = store.note(id: noteID) else { return }
-        if force || titleText != note.title { titleText = note.title }
-        if force || bodyText != note.body  { bodyText  = note.body }
-        debouncedWordCount = WordCount.count(note.body)
+        titleText = note.title
+        bodyText = note.body
+        wordCount = WordCount.count(note.body)
+        // A brand-new note starts with the cursor in the title.
+        if note.title.isEmpty && note.body.isEmpty {
+            titleFocused = true
+        }
     }
 
     private func scheduleWordCount() {
         wordCountTask?.cancel()
         let snapshot = bodyText
-        wordCountTask = Task { @MainActor in
+        wordCountTask = Task {
             try? await Task.sleep(for: .milliseconds(180))
             if Task.isCancelled { return }
-            debouncedWordCount = WordCount.count(snapshot)
-        }
-    }
-
-    // MARK: - Find
-
-    private var matchRanges: [Range<String.Index>] {
-        let q = findQuery
-        guard !q.isEmpty else { return [] }
-        var ranges: [Range<String.Index>] = []
-        var searchStart = bodyText.startIndex
-        while let r = bodyText.range(of: q, options: .caseInsensitive, range: searchStart..<bodyText.endIndex) {
-            ranges.append(r)
-            searchStart = r.upperBound
-            if searchStart == bodyText.endIndex { break }
-        }
-        return ranges
-    }
-
-    private var highlightedAttributedBody: AttributedString {
-        var attr = AttributedString(bodyText)
-        let ranges = matchRanges
-        for (i, r) in ranges.enumerated() {
-            if let nsRange = attr.range(of: bodyText[r]) {
-                attr[nsRange].backgroundColor = (i == findCurrent) ? Palette.accent.opacity(0.55) : Palette.accent.opacity(0.18)
-                attr[nsRange].foregroundColor = (i == findCurrent) ? Palette.text : Palette.text
-            }
-        }
-        return attr
-    }
-
-    private func startFind() {
-        findQuery = ""
-        findCurrent = 0
-        withAnimation(.easeOut(duration: 0.18)) { findActive = true }
-    }
-
-    private func jumpNext() {
-        let total = matchRanges.count
-        guard total > 0 else { return }
-        findCurrent = (findCurrent + 1) % total
-    }
-
-    private func jumpPrev() {
-        let total = matchRanges.count
-        guard total > 0 else { return }
-        findCurrent = (findCurrent - 1 + total) % total
-    }
-
-    private func dismissFind() {
-        withAnimation(.easeOut(duration: 0.15)) {
-            findActive = false
-            findQuery = ""
+            wordCount = WordCount.count(snapshot)
         }
     }
 }
 
 // MARK: - NSTextView wrapper for the editor body
 
+/// Plain-text editor with the standard Mac find bar (⌘F, ⌘G, ⌘E) and undo.
 private struct EditorTextView: NSViewRepresentable {
     @Binding var text: String
-    var isFocused: FocusState<Bool>.Binding
+    /// Incremented by the parent to move keyboard focus into the editor.
+    var focusRequest: Int
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -246,7 +119,8 @@ private struct EditorTextView: NSViewRepresentable {
         tv.importsGraphics = false
         tv.usesFontPanel = false
         tv.usesRuler = false
-        tv.usesInspectorBar = false
+        tv.usesFindBar = true
+        tv.isIncrementalSearchingEnabled = true
         tv.isAutomaticTextCompletionEnabled = false
         tv.isAutomaticDataDetectionEnabled = false
         tv.isAutomaticLinkDetectionEnabled = false
@@ -255,38 +129,51 @@ private struct EditorTextView: NSViewRepresentable {
         tv.isAutomaticSpellingCorrectionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false
         tv.smartInsertDeleteEnabled = false
-        tv.backgroundColor = .clear
         tv.drawsBackground = false
         tv.textContainerInset = NSSize(width: 8, height: 4)
-        tv.font = NSFont(name: Typography.onestFamily, size: 16) ?? .systemFont(ofSize: 16)
-        tv.textColor = NSColor(Palette.textSecondary)
-        tv.insertionPointColor = NSColor(Palette.accent)
-        tv.selectedTextAttributes = [
-            .backgroundColor: NSColor(Palette.accent).withAlphaComponent(0.30)
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 5
+        tv.defaultParagraphStyle = paragraph
+        tv.font = Typography.editorNSFont()
+        tv.textColor = Palette.NS.text
+        tv.insertionPointColor = Palette.NS.accent
+        tv.selectedTextAttributes = [.backgroundColor: Palette.NS.selection]
+        tv.typingAttributes = [
+            .font: Typography.editorNSFont(),
+            .foregroundColor: Palette.NS.text,
+            .paragraphStyle: paragraph,
         ]
         tv.string = text
+        context.coordinator.lastFocusRequest = focusRequest
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.text = $text
         guard let tv = scroll.documentView as? NSTextView else { return }
         if tv.string != text {
             let selected = tv.selectedRange()
             tv.string = text
             let len = (tv.string as NSString).length
-            let safe = NSRange(location: min(selected.location, len), length: 0)
-            tv.setSelectedRange(safe)
+            tv.setSelectedRange(NSRange(location: min(selected.location, len), length: 0))
+        }
+        if context.coordinator.lastFocusRequest != focusRequest {
+            context.coordinator.lastFocusRequest = focusRequest
+            tv.window?.makeFirstResponder(tv)
         }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: EditorTextView
-        init(_ parent: EditorTextView) { self.parent = parent }
+        var text: Binding<String>
+        var lastFocusRequest = 0
+
+        init(text: Binding<String>) { self.text = text }
 
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
-            if parent.text != tv.string {
-                parent.text = tv.string
+            if text.wrappedValue != tv.string {
+                text.wrappedValue = tv.string
             }
         }
     }

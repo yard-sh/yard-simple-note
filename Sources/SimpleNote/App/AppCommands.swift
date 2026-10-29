@@ -1,65 +1,70 @@
 import SwiftUI
 
-struct FocusedNoteIDKey: FocusedValueKey {
-    typealias Value = Note.ID
-}
-
-extension FocusedValues {
-    var focusedNoteID: Note.ID? {
-        get { self[FocusedNoteIDKey.self] }
-        set { self[FocusedNoteIDKey.self] = newValue }
-    }
-}
-
 struct AppCommands: Commands {
-    var store: NoteStore
-    @Binding var showPalette: Bool
-    @Binding var showFindAcross: Bool
-    @Binding var pendingDelete: Note.ID?
+    let store: NoteStore
+    let appState: AppState
+    let license: LicenseManager
+    let updates: UpdateChecker
 
-    @FocusedValue(\.focusedNoteID) private var focusedNoteID: Note.ID?
+    @Environment(\.openSettings) private var openSettings
+
+    /// Note commands are unavailable while the activation screen is showing.
+    private var locked: Bool { license.requiresActivation }
 
     var body: some Commands {
-        // ⌘N — New note (replaces default New)
-        CommandGroup(replacing: .newItem) {
-            Button("New Note") {
-                store.newNote()
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                openSettings()
+                Task { await updates.check(licenseKey: license.licenseKey) }
             }
-            .keyboardShortcut("n", modifiers: .command)
+            Button(license.isLicensed ? "License…" : "Enter License…") {
+                openSettings()
+            }
         }
 
-        // Pasteboard / undo: keep defaults.
+        CommandGroup(replacing: .newItem) {
+            Button("New Note") { store.newNote() }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(locked)
+        }
+
         CommandMenu("Note") {
             Button("Duplicate") {
-                if let id = store.selectedID ?? focusedNoteID {
-                    store.duplicate(id: id)
-                }
+                if let id = store.selectedID { store.duplicate(id: id) }
             }
             .keyboardShortcut("d", modifiers: .command)
+            .disabled(locked || store.selectedID == nil)
 
+            // ⌘⌫ is left to the text editor (delete to start of line).
             Button("Delete…") {
-                if let id = store.selectedID ?? focusedNoteID {
-                    pendingDelete = id
-                }
+                appState.pendingDelete = store.selectedID
             }
-            .keyboardShortcut(.delete, modifiers: .command)
+            .keyboardShortcut(.delete, modifiers: [.command, .shift])
+            .disabled(locked || store.selectedID == nil)
 
             Divider()
 
-            Button("Command Palette") {
-                showPalette = true
-            }
-            .keyboardShortcut("k", modifiers: .command)
+            Button("Command Palette") { appState.activeSheet = .palette }
+                .keyboardShortcut("k", modifiers: .command)
+                .disabled(locked)
 
-            Button("Find Across Notes") {
-                showFindAcross = true
-            }
-            .keyboardShortcut("f", modifiers: [.command, .shift])
+            Button("Find Across Notes") { appState.activeSheet = .findAcross }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(locked)
         }
 
-        // Replace the View menu's sidebar toggle with our own.
         CommandGroup(replacing: .sidebar) {
-            // Empty: ContentView's toolbar button owns ⌘/.
+            Button(appState.columnVisibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar") {
+                appState.toggleSidebar()
+            }
+            .keyboardShortcut("/", modifiers: .command)
+            .disabled(locked)
+
+            Button(appState.isPreview ? "Edit Note" : "Show Preview") {
+                appState.isPreview.toggle()
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(locked)
         }
     }
 }

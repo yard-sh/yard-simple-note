@@ -15,42 +15,37 @@ final class NoteStore {
     var selectedID: Note.ID?
     var searchQuery: String = ""
     private(set) var saveState: SaveState = .saved
-    var corruptionDetected: Bool = false
+    /// Set when notes.json couldn't be read at launch; holds where the bad file was moved.
+    var corruptFileURL: URL?
 
-    @ObservationIgnored
-    private var saver: DebouncedSaver?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    /// Bumped on every edit. A save only reports `.saved` if nothing changed while it ran.
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var savedGeneration = 0
+    @ObservationIgnored private let saveDelay: Duration = .milliseconds(400)
 
     init() {
-        let loaded = NotesFile.load()
-        if loaded.isEmpty {
-            let welcome = NoteStore.makeWelcomeNote()
-            self.notes = [welcome]
-            self.selectedID = welcome.id
-        } else {
-            self.notes = loaded.sorted { $0.modifiedAt > $1.modifiedAt }
-            self.selectedID = self.notes.first?.id
+        switch NotesFile.load() {
+        case .loaded(let loaded) where !loaded.isEmpty:
+            notes = loaded.sorted { $0.modifiedAt > $1.modifiedAt }
+        case .corrupt(let quarantinedAt):
+            notes = [NoteStore.makeWelcomeNote()]
+            corruptFileURL = quarantinedAt ?? NotesFile.fileURL
+        case .loaded, .missing:
+            notes = [NoteStore.makeWelcomeNote()]
+            markDirty()
         }
-
-        self.saver = DebouncedSaver { [weak self] in
-            await self?.performSave()
-        }
-
-        if !FileManager.default.fileExists(atPath: NotesFile.fileURL().path) && !loaded.isEmpty {
-            // Edge: load returned non-empty but file gone? Persist immediately.
-            saver?.schedule()
-        }
-        if loaded.isEmpty {
-            saver?.schedule()
-        }
+        selectedID = notes.first?.id
     }
 
     // MARK: - CRUD
 
     @discardableResult
     func newNote() -> Note.ID {
-        let n = Note(title: "", body: "")
+        let n = Note()
         notes.insert(n, at: 0)
         selectedID = n.id
+        searchQuery = ""
         markDirty()
         return n.id
     }
@@ -58,27 +53,23 @@ final class NoteStore {
     func delete(id: Note.ID) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
         notes.remove(at: idx)
-        if selectedID == id {
-            selectedID = notes.first?.id
-        }
         if notes.isEmpty {
             // Always keep one note around so the editor has something to show.
-            let fresh = Note(title: "", body: "")
-            notes.append(fresh)
-            selectedID = fresh.id
+            notes.append(Note())
+        }
+        if selectedID == id {
+            selectedID = notes[min(idx, notes.count - 1)].id
         }
         markDirty()
     }
 
     @discardableResult
     func duplicate(id: Note.ID) -> Note.ID? {
-        guard let original = notes.first(where: { $0.id == id }) else { return nil }
-        var copy = Note(
+        guard let original = note(id: id) else { return nil }
+        let copy = Note(
             title: original.title.isEmpty ? "" : "\(original.title) Copy",
             body: original.body
         )
-        copy.createdAt = .now
-        copy.modifiedAt = .now
         notes.insert(copy, at: 0)
         selectedID = copy.id
         markDirty()
@@ -87,19 +78,14 @@ final class NoteStore {
 
     func update(id: Note.ID, title: String? = nil, body: String? = nil) {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
-        var changed = false
-        if let title, notes[idx].title != title {
-            notes[idx].title = title
-            changed = true
-        }
-        if let body, notes[idx].body != body {
-            notes[idx].body = body
-            changed = true
-        }
-        guard changed else { return }
-        notes[idx].modifiedAt = .now
-        // Re-sort so most-recently edited floats up. Stable enough for the sidebar.
-        notes.sort { $0.modifiedAt > $1.modifiedAt }
+        var note = notes[idx]
+        if let title { note.title = title }
+        if let body { note.body = body }
+        guard note != notes[idx] else { return }
+        note.modifiedAt = .now
+        // Most-recently edited floats to the top.
+        notes.remove(at: idx)
+        notes.insert(note, at: 0)
         markDirty()
     }
 
@@ -110,66 +96,87 @@ final class NoteStore {
         return notes.first(where: { $0.id == id })
     }
 
-    func indexOf(id: Note.ID) -> Int? {
-        notes.firstIndex(where: { $0.id == id })
-    }
-
     func filtered() -> [Note] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return notes }
-        return notes.filter { n in
-            n.title.lowercased().contains(q) || n.body.lowercased().contains(q)
-        }
+        return notes.filter { $0.matches(q) }
     }
 
     struct CrossHit: Identifiable {
-        let id: UUID
+        var id: Note.ID { noteID }
         let noteID: Note.ID
         let title: String
         let context: String
-        let matchRange: Range<String.Index>?
     }
 
     func findAcross(query: String) -> [CrossHit] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return [] }
-        var hits: [CrossHit] = []
-        for note in notes {
+        return notes.compactMap { note in
             let body = note.body
-            if let range = body.range(of: q, options: .caseInsensitive) {
+            if let range = body.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) {
                 let lower = body.index(range.lowerBound, offsetBy: -30, limitedBy: body.startIndex) ?? body.startIndex
                 let upper = body.index(range.upperBound, offsetBy: 60, limitedBy: body.endIndex) ?? body.endIndex
-                let snippet = String(body[lower..<upper]).replacingOccurrences(of: "\n", with: " ")
-                hits.append(CrossHit(id: UUID(), noteID: note.id, title: note.displayTitle, context: snippet, matchRange: range))
-            } else if note.title.range(of: q, options: .caseInsensitive) != nil {
-                hits.append(CrossHit(id: UUID(), noteID: note.id, title: note.displayTitle, context: note.preview, matchRange: nil))
+                let snippet = (lower > body.startIndex ? "…" : "")
+                    + body[lower..<upper].replacingOccurrences(of: "\n", with: " ")
+                return CrossHit(noteID: note.id, title: note.displayTitle, context: snippet)
             }
+            if note.title.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil {
+                return CrossHit(noteID: note.id, title: note.displayTitle, context: note.preview)
+            }
+            return nil
         }
-        return hits
     }
 
     // MARK: - Save lifecycle
 
+    var hasUnsavedChanges: Bool { generation != savedGeneration }
+
     private func markDirty() {
+        generation += 1
         saveState = .dirty
-        saver?.schedule()
+        scheduleSave()
     }
 
-    private func performSave() async {
-        saveState = .saving
-        let snapshot = notes
+    /// Debounced save. Saves run one at a time; edits made during a save trigger another.
+    private func scheduleSave() {
+        guard saveTask == nil else { return }
+        saveTask = Task { [weak self, saveDelay] in
+            try? await Task.sleep(for: saveDelay)
+            await self?.saveLoop()
+        }
+    }
+
+    private func saveLoop() async {
+        while hasUnsavedChanges {
+            let snapshot = notes
+            let target = generation
+            saveState = .saving
+            do {
+                try await Task.detached(priority: .utility) {
+                    try NotesFile.save(snapshot, generation: target)
+                }.value
+                savedGeneration = max(savedGeneration, target)
+                saveState = hasUnsavedChanges ? .dirty : .saved
+            } catch {
+                saveState = .error(error.localizedDescription)
+                break
+            }
+        }
+        saveTask = nil
+    }
+
+    /// Synchronously writes pending changes. Called when the app is about to quit,
+    /// where an async save could be cut short.
+    func flushSync() {
+        guard hasUnsavedChanges else { return }
         do {
-            try await Task.detached(priority: .utility) {
-                try NotesFile.save(snapshot)
-            }.value
+            try NotesFile.save(notes, generation: generation)
+            savedGeneration = generation
             saveState = .saved
         } catch {
             saveState = .error(error.localizedDescription)
         }
-    }
-
-    func flushSave() async {
-        await saver?.flush()
     }
 
     // MARK: - Welcome note
@@ -190,6 +197,6 @@ final class NoteStore {
 
         That's the entire app. Now write something.
         """
-        return Note(title: "Welcome", body: body, createdAt: .now, modifiedAt: .now)
+        return Note(title: "Welcome", body: body)
     }
 }
